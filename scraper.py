@@ -9,6 +9,9 @@ import os
 import time
 import pandas as pd
 import requests
+import sqlite3
+
+from utils import paths_dict, getText_js
 
 # LinkedIn's search is notorious for a few things: displaying irrelevant content, 
 # search limits, and protections against web scraping
@@ -21,23 +24,67 @@ import requests
 # extract the data, then close the window and open the next and so on
 
 def main():
+    # Set up database to store job links 
+    conn = sqlite3.connect('jobs_bank.db')
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jobs(link TEXT PRIMARY KEY)''')
+    cursor.execute("SELECT link FROM jobs")
+    data = cursor.fetchall()
+    jobsBank = set(item[0] for item in data)
+
     start_time = time.time()
     # Define your keywords
     fullStackKey = "Full Stack Developer"
     frontEndKey = "Front End Developer"
     backEndKey = "Back End Developer"
+    junior = "Junior Developer"
+    solutionsEng = "Solutions Engineer"
+    integrator = "Software Integrator"
     country_name = "Israel"
     # country_name = "United States"
 
     # split the names into words, and join them together w url encoding for the space character
-    job_url = "%20".join(fullStackKey.split(" "))
+    job_url = "%20".join(solutionsEng.split(" "))
     country_url = "%20".join(country_name.split(" "))
 
     # Define url with desired keywords
-    # url = "https://www.linkedin.com/jobs/search?keywords={0}&location={1}&geoId=103644278&trk=public_jobs_jobs-search-bar_search-submit&position=1&pageNum=0".format(job_url,country_url)
     url = "https://www.linkedin.com/jobs/search?keywords={0}&location={1}&geoId=101620260&trk=public_jobs_jobs-search-bar_search-submit&position=1&pageNum=0".format(job_url,country_url)
     # Create a webdriver instance and get page (function defined below)
     driver = start_driver_get_url(False, url)
+    
+    filtersPath = "/html/body/div/section/div/div/div/form/ul"
+
+    # # select remote filter
+    # remotePath = f"{filtersPath}/li[6]/div/div"
+    # remFilter = driver.find_element(By.XPATH, f"{remotePath}/button")
+    # remFilter.click()
+    # remote = driver.find_element(By.XPATH, f"{remotePath}/div/div/div/div[3]/input")
+    # remote.click()
+    # done = driver.find_element(By.XPATH, f"{remotePath}/div/button")
+    # done.click()
+
+    # select experience filters
+    experPath = f"{filtersPath}/li[5]/div/div"
+    # click experience filter
+    experFilter = driver.find_element(By.XPATH, f"{experPath}/button")    
+    experFilter.click()
+    # iterate through list of experience checkboxes and select desired boxes
+    parent_div = driver.find_element(By.XPATH, f"{experPath}/div/div/div")
+    child_divs = parent_div.find_elements(By.XPATH, "./div")
+    desired_labels = ['Internship', 'Entry level']
+
+    for child in child_divs:
+        label = child.find_element(By.XPATH, "./label").text
+        input = child.find_element(By.XPATH, "./input")
+        label_text = label.split('(')[0].strip()
+
+        if label_text in desired_labels:
+            input.click()
+
+    # click done
+    done = driver.find_element(By.XPATH, f"{experPath}/div/button")
+    done.click()
+
     # Find how many jobs there are
     jobs_num = driver.find_element(By.XPATH,'//*[@id="main-content"]/div/h1/span[1]').get_attribute("innerText")
     # remove the + from the string
@@ -85,25 +132,18 @@ def main():
     job_list_element = driver.find_element(By.CLASS_NAME,"jobs-search__results-list")
     # go to each job and get its link
     jobs = job_list_element.find_elements(By.TAG_NAME, "li")
+
     for job in jobs:
         job_aTag = job.find_element(By.TAG_NAME,"a")
         link = job_aTag.get_attribute("href")
-        job_link_set.add(link)
+        if link not in jobsBank:
+            job_link_set.add(link)
+            cursor.execute("INSERT INTO jobs (link) VALUES (?)", (link,))
+            conn.commit()
 
     driver.quit()
 
-    # Define paths to all needed elements
-    paths_dict = {
-        'show_more_path': '/html/body/main/section/div/div/section/div/div/section/button',
-        'seniority_path': '/html/body/main/section/div/div/section/div/ul/li/span',
-        'job_title_path': '/html/body/main/section/div/section[2]/div/div/div/h1',
-        'company_name_path': '/html/body/main/section/div/section[2]/div/div/div/h4/div/span/a',
-        'location_path': '/html/body/main/section/div/section[2]/div/div/div/h4/div/span[2]',
-        'date_path': '/html/body/main/section/div/section[2]/div/div/div/h4/div[2]/span',
-        'jd_parent_path': '/html/body/main/section/div/div/section/div/div/section'
-    }
     levels = ["Mid-Senior level", "Senior level", "Director", "Executive", "Senior developer", "Tech lead" , "Chief technology officer"]
-
     # Loop over jobs and extract data
     for job_link in job_link_set:
         retry_count = 0
@@ -124,6 +164,7 @@ def main():
             # To reduce # of calls to browser, get all elements from one parent element
             try:
                 parent = driver.find_element(By.XPATH, "/html/body/main/section/div")
+                retry_count = max_retries
             except Exception as e:
                 print(f"An error occurred: {str(e)}")
                 driver.quit()
@@ -138,21 +179,7 @@ def main():
             # get job description element
             jd_parent_element = parent.find_element(By.XPATH, paths_dict["jd_parent_path"])
             # get all text from all children elements inside job description
-            text_list = driver.execute_script("""
-                const parent = arguments[0];
-                const descendants = parent.childNodes;
-                let text_list = [];
-                for (let i = 0; i < descendants.length; i++) {
-                    const element = descendants[i];
-                    if (element.nodeType === Node.ELEMENT_NODE) {
-                        const element_text = element.textContent.trim();
-                        if (element_text !== '') {
-                            text_list.push(element_text);
-                        }
-                    }
-                }
-                return text_list;
-            """, jd_parent_element)
+            text_list = driver.execute_script(getText_js, jd_parent_element)
             # join together all text but separate with a new line between elements
             jd_text = '\n'.join(text_list)
 #########################################################  THIS SECTION CAN BE COMMENTED OUT
@@ -161,11 +188,9 @@ def main():
             seniorityText = seniority_element.text.lower()
 
             fullString = jd_text.lower() + titleText + seniorityText
-            if not ("junior" in fullString or "entry level" in fullString):
+            if not ("junior" in fullString or "entry level" in fullString or "jr" in fullString):
                 driver.quit()
                 continue
-            print(titleText, seniorityText, jd_text.lower())
-            input("paused")
 #######################################################################################################################
             # If applicable, only extract the text after "Requirements"
             if "Requirements" in jd_text:
@@ -191,12 +216,9 @@ def main():
         #job_link
         job_link_list.append(job_link)
 
-        
-
         # close the current window
         driver.quit()
 
-    # print(company_name_list, date_list, seniority_list)
     # Create a Pandas dataFrame for the data
     job_data = pd.DataFrame({
         'Date': date_list,
